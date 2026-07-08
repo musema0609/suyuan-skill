@@ -26,6 +26,7 @@
 | [**codex-review**](./codex-review/) | 单模型审查有盲区 | 两个 GPT 模型独立审查同一份代码，Claude 仲裁分歧。review / fix / audit / autopilot 四种模式 |
 | [**task-triage**](./task-triage/) | 什么都想做，注意力被耗散 | 5+1 维度打分，帮你判断一件事值不值得做、该不该你做 |
 | [**cc-shield**](./cc-shield/) | Claude Code 隐私泄露风险 | 关闭遥测、清理设备指纹、安全换号 |
+| [**claude-cleanup-audit**](./claude-cleanup-audit/) | Claude 本地数据清理容易漏项 | 逐项审计 Claude Code / Desktop、本机身份、时区和 settings，修改前先确认 |
 
 ### 独立仓库
 

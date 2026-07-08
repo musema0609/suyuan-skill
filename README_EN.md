@@ -26,6 +26,7 @@
 | [**codex-review**](./codex-review/) | Single-model review has blind spots | Two GPT models review the same code independently, Claude arbitrates. Supports review / fix / audit / autopilot modes |
 | [**task-triage**](./task-triage/) | Trying to do everything, attention scattered | 5+1 dimension scoring to decide if a task is worth doing and whether YOU should do it |
 | [**cc-shield**](./cc-shield/) | Claude Code privacy leak risks | Disable telemetry, clean device fingerprints, safe account switching |
+| [**claude-cleanup-audit**](./claude-cleanup-audit/) | Claude local cleanup is easy to miss | Audits Claude Code / Desktop, Mac identity, timezone, and settings with confirmation before changes |
 
 ### Standalone Repos
 
