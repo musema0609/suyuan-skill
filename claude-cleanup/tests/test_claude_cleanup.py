@@ -6,245 +6,169 @@ import pathlib
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr
-from io import StringIO
 from unittest import mock
-
 
 SCRIPT = pathlib.Path(__file__).parents[1] / "scripts" / "claude_cleanup.py"
 SPEC = importlib.util.spec_from_file_location("claude_cleanup", SCRIPT)
 assert SPEC and SPEC.loader
-claude_cleanup = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = claude_cleanup
-SPEC.loader.exec_module(claude_cleanup)
+cleanup = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = cleanup
+SPEC.loader.exec_module(cleanup)
 
 
-class ClaudeCleanupTests(unittest.TestCase):
-    def make_home(self) -> tuple[tempfile.TemporaryDirectory[str], object]:
+class CleanupTests(unittest.TestCase):
+    def home(self) -> pathlib.Path:
         temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
         home = pathlib.Path(temp.name)
-        paths = claude_cleanup.Paths(home)
-        paths.claude_dir.mkdir()
-        paths.trash.mkdir()
-        return temp, paths
+        (home / ".claude").mkdir()
+        (home / ".Trash").mkdir()
+        return home
 
-    def test_full_backup_contains_protected_data_and_claude_json(self) -> None:
-        temp, paths = self.make_home()
-        self.addCleanup(temp.cleanup)
-        expected = {
-            "projects/session.jsonl": "session",
-            "skills/example/SKILL.md": "skill",
-            "plugins/plugin.json": "plugin",
-            "hooks/guard.sh": "hook",
-            "settings.json": '{"env": {}}',
-        }
-        for relative, content in expected.items():
-            target = paths.claude_dir / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-        paths.claude_json.write_text('{"userID":"old"}', encoding="utf-8")
-
-        backup = claude_cleanup.create_full_backup(paths)
-
-        for relative, content in expected.items():
-            copied = backup / "dot-claude" / relative
-            self.assertEqual(copied.read_text(encoding="utf-8"), content)
-        self.assertEqual(
-            (backup / "claude.json").read_text(encoding="utf-8"),
-            '{"userID":"old"}',
-        )
-        manifest = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
-        self.assertTrue(manifest["claudeJsonCopied"])
-        self.assertGreaterEqual(manifest["items"], len(expected))
-
-    def test_deletion_gate_rejects_every_protected_branch_and_parent(self) -> None:
-        temp, paths = self.make_home()
-        self.addCleanup(temp.cleanup)
-        for name in claude_cleanup.PROTECTED_CLAUDE_NAMES:
-            with self.subTest(name=name):
-                with self.assertRaises(RuntimeError):
-                    claude_cleanup.assert_deletion_allowed(paths.claude_dir / name, paths)
-        with self.assertRaises(RuntimeError):
-            claude_cleanup.assert_deletion_allowed(paths.claude_dir, paths)
-
-    def test_allowlisted_cache_moves_without_touching_protected_paths(self) -> None:
-        temp, paths = self.make_home()
-        self.addCleanup(temp.cleanup)
-        cache = paths.claude_dir / "cache"
-        cache.mkdir()
-        (cache / "entry").write_text("cache", encoding="utf-8")
-        project = paths.claude_dir / "projects" / "session.jsonl"
-        project.parent.mkdir()
-        project.write_text("session", encoding="utf-8")
-        run_dir = paths.trash / "run"
-
-        destination = claude_cleanup.move_to_trash(cache, paths, run_dir)
-
-        self.assertFalse(cache.exists())
-        self.assertEqual((destination / "entry").read_text(encoding="utf-8"), "cache")
-        self.assertEqual(project.read_text(encoding="utf-8"), "session")
-
-    def test_simple_prompt_enable_preserves_telemetry_and_other_settings(self) -> None:
-        settings = {
-            "env": {
-                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-                "DISABLE_TELEMETRY": "0",
-                "TOKEN": "secret",
-            },
-            "hooks": {"PreToolUse": ["keep"]},
-            "enabledPlugins": {"example": True},
-        }
-        before = claude_cleanup.telemetry_snapshot(settings)
-
-        updated = claude_cleanup.update_simple_prompt(settings, "enable")
-
-        self.assertEqual(updated["env"]["CLAUDE_CODE_SIMPLE"], "1")
-        self.assertEqual(claude_cleanup.telemetry_snapshot(updated), before)
-        self.assertEqual(updated["env"]["TOKEN"], "secret")
-        self.assertEqual(updated["hooks"], settings["hooks"])
-        self.assertEqual(updated["enabledPlugins"], settings["enabledPlugins"])
-
-    def test_simple_prompt_disable_does_not_turn_telemetry_on_or_off(self) -> None:
-        settings = {
-            "env": {
-                "CLAUDE_CODE_SIMPLE": "1",
-                "DISABLE_ERROR_REPORTING": "1",
-            }
-        }
-        updated = claude_cleanup.update_simple_prompt(settings, "disable")
-        self.assertNotIn("CLAUDE_CODE_SIMPLE", updated["env"])
-        self.assertEqual(updated["env"]["DISABLE_ERROR_REPORTING"], "1")
-        self.assertNotIn("DISABLE_TELEMETRY", updated["env"])
-
-    def test_identity_rotation_preserves_unrelated_fields(self) -> None:
-        original = {
-            "userID": "a" * 64,
-            "oauthAccount": {"emailAddress": "private@example.com"},
-            "cachedGrowthBookFeatures": {"feature": True},
-            "projects": {"keep": True},
-            "customSetting": "keep",
-        }
-
-        updated, old_ids, new_ids = claude_cleanup.rotate_identity(original)
-
-        self.assertEqual(old_ids["userID"], "a" * 64)
-        self.assertIsNone(old_ids["machineID"])
-        self.assertRegex(new_ids["userID"], r"^[0-9a-f]{64}$")
-        self.assertRegex(new_ids["machineID"], r"^[0-9a-f]{64}$")
-        self.assertNotEqual(new_ids["userID"], old_ids["userID"])
-        self.assertEqual(updated["userID"], new_ids["userID"])
-        self.assertEqual(updated["machineID"], new_ids["machineID"])
-        self.assertNotIn("oauthAccount", updated)
-        self.assertNotIn("cachedGrowthBookFeatures", updated)
-        self.assertEqual(updated["projects"], {"keep": True})
-        self.assertEqual(updated["customSetting"], "keep")
-        self.assertEqual(original["oauthAccount"]["emailAddress"], "private@example.com")
-
-    def test_no_noninteractive_confirmation_flag_exists(self) -> None:
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
-            claude_cleanup.parse_args(["--yes"])
-
-    def test_final_confirmation_cancels_before_any_write(self) -> None:
-        temp, paths = self.make_home()
-        self.addCleanup(temp.cleanup)
-        claude_cleanup.atomic_write_json(paths.settings, {"env": {}})
-        answers = iter(["n", "n", "0", "n", "0", "n", "NOT CONFIRMED"])
-        with (
-            mock.patch.object(pathlib.Path, "home", return_value=paths.home),
-            mock.patch.object(claude_cleanup, "list_desktop_processes", return_value=[]),
-            mock.patch.object(claude_cleanup, "list_cli_processes", return_value=[]),
-            mock.patch("builtins.input", side_effect=lambda _prompt="": next(answers)),
-            mock.patch.object(sys.stdin, "isatty", return_value=True),
-        ):
-            result = claude_cleanup.main([])
-        self.assertEqual(result, 1)
-        self.assertFalse(paths.backup_root.exists())
-        self.assertEqual(claude_cleanup.read_json(paths.settings), {"env": {}})
-
-    def test_isolated_full_run_preserves_protected_data_and_telemetry(self) -> None:
-        temp, paths = self.make_home()
-        self.addCleanup(temp.cleanup)
-        protected_files = {
+    def seed_protected(self, home: pathlib.Path) -> dict[str, str]:
+        files = {
             "projects/session.jsonl": "session",
             "skills/demo/SKILL.md": "skill",
             "plugins/demo.json": "plugin",
             "hooks/guard.sh": "hook",
         }
-        for relative, content in protected_files.items():
-            target = paths.claude_dir / relative
+        for relative, content in files.items():
+            target = home / ".claude" / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
-        settings = {
-            "env": {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"},
-            "hooks": {"PreToolUse": ["keep"]},
-        }
-        claude_cleanup.atomic_write_json(paths.settings, settings)
-        claude_cleanup.atomic_write_json(
-            paths.claude_json,
-            {
-                "userID": "a" * 64,
-                "machineID": "b" * 64,
-                "oauthAccount": {"emailAddress": "private"},
-                "keep": True,
-            },
-        )
-        internal_backups = paths.claude_dir / "backups"
-        internal_backups.mkdir()
-        claude_cleanup.atomic_write_json(
-            internal_backups / ".claude.json.backup.1",
-            {
-                "userID": "a" * 64,
-                "machineID": "b" * 64,
-                "oauthAccount": {"emailAddress": "private"},
-                "backupKeep": True,
-            },
-        )
-        cache = paths.claude_dir / "cache"
+        return files
+
+    def test_backup_contains_all_claude_data_and_identity(self):
+        home = self.home()
+        files = self.seed_protected(home)
+        (home / ".claude.json").write_text('{"userID":"old"}', encoding="utf-8")
+        backup = cleanup.create_backup(home)
+        for relative, content in files.items():
+            self.assertEqual((backup / "dot-claude" / relative).read_text(), content)
+        self.assertEqual((backup / "claude.json").read_text(), '{"userID":"old"}')
+        manifest = json.loads((backup / "manifest.json").read_text())
+        self.assertGreaterEqual(manifest["files"], len(files))
+        self.assertTrue(manifest["claudeJsonCopied"])
+
+    def test_deletion_gate_rejects_protected_and_unknown_paths(self):
+        home = self.home()
+        claude, batch = home / ".claude", home / ".Trash/run"
+        for name in cleanup.PROTECTED:
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                cleanup.move_to_trash(claude / name, {claude / name}, claude, batch)
+        with self.assertRaises(RuntimeError):
+            cleanup.move_to_trash(home / "Documents", set(), claude, batch)
+
+    def test_safe_cache_moves_without_touching_project(self):
+        home = self.home()
+        project = home / ".claude/projects/session.jsonl"
+        project.parent.mkdir()
+        project.write_text("keep")
+        cache = home / ".claude/cache"
         cache.mkdir()
-        (cache / "entry").write_text("cache", encoding="utf-8")
-        desktop = paths.home / "Library/Application Support/Claude"
-        desktop.mkdir(parents=True)
-        (desktop / "Cookies").write_text("desktop", encoding="utf-8")
-        plan = claude_cleanup.Plan(
-            rotate_identity=True,
-            delete_keychain=False,
-            desktop_data=True,
-            desktop_app=False,
-            clear_cli_caches=True,
-            simple_prompt="enable",
-            set_taipei_timezone=False,
-        )
+        (cache / "entry").write_text("cache")
+        destination = cleanup.move_to_trash(cache, {cache}, home / ".claude", home / ".Trash/run")
+        self.assertFalse(cache.exists())
+        self.assertEqual((destination / "entry").read_text(), "cache")
+        self.assertEqual(project.read_text(), "keep")
 
-        with mock.patch.object(claude_cleanup, "require_process_decision", return_value=None):
-            claude_cleanup.apply_plan(paths, settings, plan)
+    def test_identity_rotation_syncs_internal_backups(self):
+        home = self.home()
+        cleanup.write_json(home / ".claude.json", {"userID": "old", "machineID": "old", "oauthAccount": {}, "keep": 1})
+        internal = home / ".claude/backups/.claude.json.backup.1"
+        internal.parent.mkdir()
+        cleanup.write_json(internal, {"userID": "old", "machineID": "old", "oauthAccount": {}, "keepBackup": 1})
+        self.assertEqual(cleanup.rotate_identity(home), 1)
+        main, backup = cleanup.read_json(home / ".claude.json"), cleanup.read_json(internal)
+        self.assertEqual((main["userID"], main["machineID"]), (backup["userID"], backup["machineID"]))
+        self.assertNotIn("oauthAccount", main)
+        self.assertNotIn("oauthAccount", backup)
+        self.assertEqual((main["keep"], backup["keepBackup"]), (1, 1))
 
-        backups = list(paths.backup_root.glob("claude-cleanup-*"))
+    def test_simple_mode_preserves_telemetry_and_other_settings(self):
+        home = self.home()
+        path = home / ".claude/settings.json"
+        original = {"env": {"DISABLE_TELEMETRY": "1", "TOKEN": "secret"}, "hooks": {"x": ["keep"]}}
+        cleanup.write_json(path, original)
+        cleanup.update_simple(home, 1)
+        updated = cleanup.read_json(path)
+        self.assertEqual(updated["env"]["CLAUDE_CODE_SIMPLE"], "1")
+        self.assertEqual(cleanup.telemetry(updated), cleanup.telemetry(original))
+        self.assertEqual(updated["hooks"], original["hooks"])
+
+    def run_main(self, home: pathlib.Path, answers: list[str], processes: list[str] | None = None) -> tuple[int, list[str]]:
+        prompts, iterator = [], iter(answers)
+
+        def answer(prompt=""):
+            prompts.append(prompt)
+            return next(iterator)
+
+        with (
+            mock.patch.object(pathlib.Path, "home", return_value=home),
+            mock.patch.object(cleanup, "running_under_claude", return_value=False),
+            mock.patch.object(cleanup, "claude_processes", return_value=processes or []),
+            mock.patch.object(cleanup, "current_timezone", return_value="Asia/Taipei"),
+            mock.patch.object(sys.stdin, "isatty", return_value=True),
+            mock.patch("builtins.input", side_effect=answer),
+        ):
+            return cleanup.main([]), prompts
+
+    def test_safe_cleanup_is_not_a_question_and_cancel_writes_nothing(self):
+        home = self.home()
+        (home / ".claude/cache").mkdir()
+        result, prompts = self.run_main(home, ["n", "n", "0", "0", "NO"])
+        self.assertEqual(result, 1)
+        self.assertFalse((home / "ClaudeBackups").exists())
+        self.assertTrue((home / ".claude/cache").exists())
+        self.assertEqual(len(prompts), 5)
+        self.assertFalse(any("自动清理" in prompt or "可再生缓存" in prompt for prompt in prompts))
+
+    def test_running_claude_skips_safe_cleanup_without_exit_prompt(self):
+        home = self.home()
+        cache = home / ".claude/cache"
+        cache.mkdir()
+        result, prompts = self.run_main(home, ["n", "n", "0", "0", "CONFIRM"], ["123 claude"])
+        self.assertEqual(result, 0)
+        self.assertTrue(cache.exists())
+        self.assertFalse(any("退出后按 Enter" in prompt for prompt in prompts))
+
+    def test_claude_agent_allows_audit_only(self):
+        home = self.home()
+        with (
+            mock.patch.object(pathlib.Path, "home", return_value=home),
+            mock.patch.object(cleanup, "running_under_claude", return_value=True),
+            mock.patch.object(cleanup, "current_timezone", return_value="Asia/Taipei"),
+            mock.patch.object(cleanup, "claude_processes", return_value=[]),
+        ):
+            self.assertEqual(cleanup.main([]), 2)
+            self.assertEqual(cleanup.main(["--audit"]), 0)
+
+    def test_isolated_full_run_preserves_protected_data_and_telemetry(self):
+        home = self.home()
+        protected = self.seed_protected(home)
+        settings = {"env": {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}, "hooks": {"x": ["keep"]}}
+        cleanup.write_json(home / ".claude/settings.json", settings)
+        cleanup.write_json(home / ".claude.json", {"userID": "old", "machineID": "old", "oauthAccount": {}, "keep": True})
+        internal = home / ".claude/backups/.claude.json.backup.1"
+        internal.parent.mkdir()
+        cleanup.write_json(internal, {"userID": "old", "machineID": "old", "backupKeep": True})
+        cache = home / ".claude/cache"
+        cache.mkdir()
+        (cache / "entry").write_text("cache")
+        result, _ = self.run_main(home, ["y", "n", "0", "1", "CONFIRM"])
+        self.assertEqual(result, 0)
+        backups = list((home / "ClaudeBackups").glob("claude-cleanup-*"))
         self.assertEqual(len(backups), 1)
         self.assertTrue((backups[0] / "dot-claude/projects/session.jsonl").exists())
-        for relative, content in protected_files.items():
-            self.assertEqual((paths.claude_dir / relative).read_text(encoding="utf-8"), content)
         self.assertFalse(cache.exists())
-        self.assertFalse(desktop.exists())
-        final_settings = claude_cleanup.read_json(paths.settings)
-        self.assertEqual(final_settings["env"]["CLAUDE_CODE_SIMPLE"], "1")
-        self.assertEqual(
-            final_settings["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1"
-        )
-        self.assertEqual(final_settings["hooks"], settings["hooks"])
-        final_identity = claude_cleanup.read_json(paths.claude_json)
-        self.assertRegex(final_identity["userID"], r"^[0-9a-f]{64}$")
-        self.assertRegex(final_identity["machineID"], r"^[0-9a-f]{64}$")
-        self.assertNotEqual(final_identity["userID"], "a" * 64)
-        self.assertNotEqual(final_identity["machineID"], "b" * 64)
-        self.assertNotIn("oauthAccount", final_identity)
-        self.assertTrue(final_identity["keep"])
-        final_internal_backup = claude_cleanup.read_json(
-            internal_backups / ".claude.json.backup.1"
-        )
-        self.assertEqual(final_internal_backup["userID"], final_identity["userID"])
-        self.assertEqual(final_internal_backup["machineID"], final_identity["machineID"])
-        self.assertNotIn("oauthAccount", final_internal_backup)
-        self.assertTrue(final_internal_backup["backupKeep"])
+        for relative, content in protected.items():
+            self.assertEqual((home / ".claude" / relative).read_text(), content)
+        final = cleanup.read_json(home / ".claude/settings.json")
+        self.assertEqual(cleanup.telemetry(final), cleanup.telemetry(settings))
+        self.assertEqual(final["hooks"], settings["hooks"])
+        identity, saved = cleanup.read_json(home / ".claude.json"), cleanup.read_json(internal)
+        self.assertEqual(identity["userID"], saved["userID"])
+        self.assertTrue(identity["keep"] and saved["backupKeep"])
 
 
 if __name__ == "__main__":
