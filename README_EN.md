@@ -25,6 +25,7 @@
 | [**break-ai-slop**](./break-ai-slop/) | AI output is correct but mediocre | Forces expert tacit knowledge extraction before execution. 4-step cognitive calibration that turns "AI-flavored" output into "someone who's done this before" output |
 | [**codex-review**](./codex-review/) | Single-model review has blind spots | Two GPT models review the same code independently, Claude arbitrates. Supports review / fix / audit / autopilot modes |
 | [**task-triage**](./task-triage/) | Trying to do everything, attention scattered | 5+1 dimension scoring to decide if a task is worth doing and whether YOU should do it |
+| [**whatis**](./whatis/) | Reading paragraphs still leaves you without a mental picture | What Is This — explains any topic as a picture-first HTML page. Real SVG diagrams (flowchart, sequence, architecture, timeline...), and it goes gathering context itself when the current one is not enough |
 | [**claude-cleanup**](./claude-cleanup/) | Claude cleanup can erase sessions or configuration | Back up first, then confirm Desktop cleanup, local ID reset, telemetry inheritance, and prompt slimming |
 | [**claude-cleanup-audit**](./claude-cleanup-audit/) | Claude local cleanup is easy to miss | Audits Claude Code / Desktop, Mac identity, timezone, and settings with confirmation before changes |
 
