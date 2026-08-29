@@ -1,0 +1,4 @@
+interface:
+  display_name: "Claude Cleanup Audit for Windows"
+  short_description: "Audit local Claude cleanup and Windows identity settings"
+  default_prompt: "Use $claude-cleanup-audit-windows to audit my Claude local cleanup checklist before changing anything."
