@@ -183,16 +183,33 @@ function Test-ClaudeProcessRecord($Process) {
 }
 
 function Get-ClaudeProcesses {
-    try {
-        return @(Get-CimInstance Win32_Process -ErrorAction Stop |
-            Where-Object { $_.ProcessId -ne $PID -and (Test-ClaudeProcessRecord $_) } |
-            ForEach-Object { "{0} {1} {2}" -f $_.ProcessId, $_.Name, ([string]$_.CommandLine) })
-    } catch {
-        throw "无法审计 Claude 进程：$($_.Exception.Message)"
+    $evidence = [Collections.Generic.List[string]]::new()
+    try { $processes = @(Get-Process -ErrorAction Stop) }
+    catch { throw "无法审计 Claude 进程：$($_.Exception.Message)" }
+    foreach ($process in $processes) {
+        if ($process.Id -eq $PID) { continue }
+        $name = [string]$process.ProcessName
+        $path = try { [string]$process.Path } catch { '' }
+        if ($name -match '^(?i:claude|claude-code)$') {
+            $evidence.Add(("{0} {1}.exe {2}" -f $process.Id, $name, $path).Trim())
+            continue
+        }
+        if ($name -notmatch '^(?i:node)$' -or $path -match '(?i)[\\/]OpenAI[\\/]Codex[\\/]') { continue }
+        $commandLine = ''
+        try {
+            $record = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)" -ErrorAction Stop
+            $commandLine = [string]$record.CommandLine
+        } catch {}
+        if ($commandLine -match '(?i)@anthropic-ai[\\/]claude-code|[\\/]\.local[\\/](bin|share)[\\/]claude' -or
+            $path -match '(?i)anthropic|claude') {
+            $evidence.Add(("{0} node.exe {1}" -f $process.Id, $(if ($commandLine) {$commandLine} else {$path})).Trim())
+        }
     }
+    return @($evidence | Sort-Object -Unique)
 }
 
 function Test-RunningUnderClaude {
+    if ($env:CLAUDECODE -match '^(?i:1|true|yes)$' -or $env:CLAUDE_CODE_ENTRYPOINT) { return $true }
     try {
         $currentId = $PID
         for ($i = 0; $i -lt 16; $i++) {
