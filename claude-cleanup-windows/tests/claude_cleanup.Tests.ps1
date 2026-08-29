@@ -58,6 +58,29 @@ Invoke-Test 'backup contains all Claude data and identity' {
     } finally { Remove-Item -LiteralPath $testHomePath -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Invoke-Test 'backup records reparse points without following their targets' {
+    $testHomePath = New-TestHome
+    $externalPath = Join-Path ([IO.Path]::GetTempPath()) ('claude-cleanup-external-' + [guid]::NewGuid().ToString('N'))
+    $linkPath = Join-Path $testHomePath '.claude\external-link'
+    try {
+        New-Item -ItemType Directory -Path $externalPath -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $externalPath 'outside.txt') -Value 'must not be copied' -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $testHomePath '.claude\inside.txt') -Value 'must be copied' -Encoding UTF8
+        New-Item -ItemType Junction -Path $linkPath -Target $externalPath | Out-Null
+        Set-Content -LiteralPath (Join-Path $testHomePath '.claude.json') -Value '{"userID":"old"}' -Encoding UTF8
+        $backup = New-ClaudeBackup $testHomePath
+        $manifest = Read-JsonFile (Join-Path $backup 'manifest.json')
+        Assert-Equal 1 (Get-PropertyValue $manifest 'reparsePointCount') 'reparse point count mismatch'
+        Assert-Equal 'external-link' @((Get-PropertyValue $manifest 'reparsePoints'))[0].relativePath 'reparse point path missing from manifest'
+        Assert-True (Test-Path -LiteralPath (Join-Path $backup 'dot-claude\inside.txt')) 'regular file missing from backup'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $backup 'dot-claude\external-link\outside.txt'))) 'external target was followed into backup'
+        Assert-True (Test-Path -LiteralPath (Join-Path $externalPath 'outside.txt')) 'external target was modified'
+    } finally {
+        if (Test-Path -LiteralPath $linkPath) { try { [IO.Directory]::Delete($linkPath) } catch {} }
+        Remove-Item -LiteralPath $testHomePath,$externalPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Invoke-Test 'deletion gate rejects protected and unknown paths' {
     $testHomePath = New-TestHome
     try {
