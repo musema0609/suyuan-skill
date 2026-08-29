@@ -185,14 +185,13 @@ function Invoke-ClaudeCleanupAudit([string]$UserHomePath, [string]$ExpectedZone,
         $items.Add((New-StatusItem 'timezone' 'Windows timezone' 'unknown' '系统/第三方限制' $_.Exception.Message))
     }
 
-    try {
-        $computer = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
-        $localUser = if (Get-Command Get-LocalUser -ErrorAction SilentlyContinue) { Get-LocalUser -Name $env:USERNAME -ErrorAction SilentlyContinue } else { $null }
-        $identityEvidence = "ComputerName=$($computer.Name); Domain=$($computer.Domain); PartOfDomain=$($computer.PartOfDomain); User=$env:USERNAME; FullName=$(if ($localUser) {$localUser.FullName} else {'<unavailable>'}); Profile=$UserHomePath"
-        $items.Add((New-StatusItem 'windows-identity' 'Windows device and account names' 'needs_user_decision' '用户确认' $identityEvidence 'If this matters, confirm exact target names and whether the device is managed.'))
-    } catch {
-        $items.Add((New-StatusItem 'windows-identity' 'Windows device and account names' 'unknown' '系统/第三方限制' $_.Exception.Message))
-    }
+    $computer = try { Get-CimInstance Win32_ComputerSystem -ErrorAction Stop } catch { $null }
+    $localUser = if (Get-Command Get-LocalUser -ErrorAction SilentlyContinue) { Get-LocalUser -Name $env:USERNAME -ErrorAction SilentlyContinue } else { $null }
+    $computerName = if ($computer) { [string]$computer.Name } elseif ($env:COMPUTERNAME) { [string]$env:COMPUTERNAME } else { '<unavailable>' }
+    $domain = if ($computer) { [string]$computer.Domain } elseif ($env:USERDOMAIN) { [string]$env:USERDOMAIN } else { '<unavailable>' }
+    $partOfDomain = if ($computer) { [string]$computer.PartOfDomain } else { '<unavailable without WMI>' }
+    $identityEvidence = "ComputerName=$computerName; Domain=$domain; PartOfDomain=$partOfDomain; User=$env:USERNAME; FullName=$(if ($localUser) {$localUser.FullName} else {'<unavailable>'}); Profile=$UserHomePath"
+    $items.Add((New-StatusItem 'windows-identity' 'Windows device and account names' 'needs_user_decision' '用户确认' $identityEvidence 'If this matters, confirm exact target names and whether the device is managed.'))
 
     try {
         $culture = (Get-Culture).Name
@@ -327,7 +326,7 @@ function Invoke-ClaudeCleanupAudit([string]$UserHomePath, [string]$ExpectedZone,
     $items.Add((New-StatusItem 'timezone-helper' 'GMT8Clock helper' $(if (-not $presentHelpers.Count -and -not $scheduled.Count) {'done'} else {'needs_agent_action'}) $(if (-not $presentHelpers.Count -and -not $scheduled.Count) {'已验证'} else {'Agent 待处理'}) $(if (-not $presentHelpers.Count -and -not $scheduled.Count) {'not installed and no scheduled task found'} else {'present or scheduled'})))
 
     $processes = @(Get-ClaudeProcessEvidence)
-    $items.Add((New-StatusItem 'active-processes' 'Active Claude processes' $(if ($processes.Count) {'needs_user_decision'} else {'done'}) $(if ($processes.Count) {'用户确认'} else {'已验证'}) $(if ($processes.Count) {$processes -join [Environment]::NewLine} else {'none found'}) $(if ($processes.Count) {'Ask before stopping active processes.'} else {''})))
+    $items.Add((New-StatusItem 'active-processes' 'Active Claude processes' $(if ($processes.Count) {'needs_user_decision'} else {'done'}) $(if ($processes.Count) {'用户确认'} else {'已验证'}) $(if ($processes.Count) {$processes -join [Environment]::NewLine} else {'none found'}) $(if ($processes.Count) {'Ask the user to close them normally; never stop processes automatically.'} else {''})))
 
     $wslResult = if (Get-Command wsl.exe -ErrorAction SilentlyContinue) { Invoke-External 'wsl.exe' @('-l','-q') 8 } else { $null }
     $wslEvidence = if ($null -ne $wslResult -and $wslResult.ExitCode -eq 0 -and $wslResult.StdOut) { $wslResult.StdOut -replace "`0", '' } else { 'no WSL distributions detected' }
