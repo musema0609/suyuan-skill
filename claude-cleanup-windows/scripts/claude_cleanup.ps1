@@ -229,12 +229,56 @@ function Get-CurrentTimeZoneId {
     try { return (Get-TimeZone -ErrorAction Stop).Id } catch { return '未知' }
 }
 
-function Get-FileStats([string]$Root) {
-    $files = @(Get-ChildItem -LiteralPath $Root -Recurse -File -Force -ErrorAction Stop |
-        Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })
+function Get-TreeInventory([string]$Root) {
+    $rootFull = Get-FullPath $Root
+    $pending = [Collections.Generic.Queue[string]]::new()
+    $pending.Enqueue($rootFull)
+    $fileCount = 0
     $bytes = 0L
-    foreach ($file in $files) { $bytes += [long]$file.Length }
-    return [pscustomobject]@{ Files = $files.Count; Bytes = $bytes }
+    $reparsePoints = [Collections.Generic.List[object]]::new()
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Dequeue()
+        foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                $relative = $item.FullName.Substring($rootFull.Length).TrimStart([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+                $linkType = if ($item.PSObject.Properties['LinkType']) { [string]$item.LinkType } else { 'ReparsePoint' }
+                $targets = if ($item.PSObject.Properties['Target']) { @($item.Target | ForEach-Object { [string]$_ }) } else { @() }
+                $reparsePoints.Add([ordered]@{
+                    relativePath = $relative
+                    linkType = $linkType
+                    targets = $targets
+                    isDirectory = [bool]$item.PSIsContainer
+                })
+                continue
+            }
+            if ($item.PSIsContainer) { $pending.Enqueue($item.FullName) }
+            else {
+                $fileCount++
+                $bytes += [long]$item.Length
+            }
+        }
+    }
+    return [pscustomobject]@{ Files = $fileCount; Bytes = $bytes; ReparsePoints = @($reparsePoints) }
+}
+
+function Copy-TreeWithoutReparse([string]$Source, [string]$Destination) {
+    $sourceFull = Get-FullPath $Source
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    $pending = [Collections.Generic.Queue[object]]::new()
+    $pending.Enqueue([pscustomobject]@{ Source = $sourceFull; Destination = (Get-FullPath $Destination) })
+    while ($pending.Count -gt 0) {
+        $current = $pending.Dequeue()
+        foreach ($item in @(Get-ChildItem -LiteralPath $current.Source -Force -ErrorAction Stop)) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+            $destinationItem = Join-Path $current.Destination $item.Name
+            if ($item.PSIsContainer) {
+                New-Item -ItemType Directory -Path $destinationItem -Force | Out-Null
+                $pending.Enqueue([pscustomobject]@{ Source = $item.FullName; Destination = $destinationItem })
+            } else {
+                Copy-Item -LiteralPath $item.FullName -Destination $destinationItem -Force
+            }
+        }
+    }
 }
 
 function New-ClaudeBackup([string]$UserHomePath) {
@@ -242,21 +286,16 @@ function New-ClaudeBackup([string]$UserHomePath) {
     if (-not (Test-Path -LiteralPath $roots.Claude -PathType Container)) {
         throw '%USERPROFILE%\.claude 不存在，无法满足先全量备份的硬要求'
     }
-    $reparse = @(Get-ChildItem -LiteralPath $roots.Claude -Recurse -Force -ErrorAction Stop |
-        Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
-    if ($reparse.Count -gt 0) {
-        throw "~/.claude 内含 Windows 重解析点，拒绝跟随并停止备份：$($reparse[0].FullName)"
-    }
+    $sourceInventory = Get-TreeInventory $roots.Claude
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fffffff'
     $backupRoot = Join-Path $UserHomePath 'ClaudeBackups'
     $partial = Join-Path $backupRoot "claude-cleanup-$stamp.partial"
     $final = $partial.Substring(0, $partial.Length - '.partial'.Length)
     New-Item -ItemType Directory -Path $partial -Force | Out-Null
     try {
-        Copy-Item -LiteralPath $roots.Claude -Destination (Join-Path $partial 'dot-claude') -Recurse -Force
-        $sourceStats = Get-FileStats $roots.Claude
-        $backupStats = Get-FileStats (Join-Path $partial 'dot-claude')
-        if ($sourceStats.Files -ne $backupStats.Files -or $sourceStats.Bytes -ne $backupStats.Bytes) {
+        Copy-TreeWithoutReparse $roots.Claude (Join-Path $partial 'dot-claude')
+        $backupInventory = Get-TreeInventory (Join-Path $partial 'dot-claude')
+        if ($sourceInventory.Files -ne $backupInventory.Files -or $sourceInventory.Bytes -ne $backupInventory.Bytes -or $backupInventory.ReparsePoints.Count -ne 0) {
             throw "~/.claude 备份校验失败，保留未完成副本：$partial"
         }
         $identityCopied = $false
@@ -267,8 +306,10 @@ function New-ClaudeBackup([string]$UserHomePath) {
             if (-not $identityCopied) { throw "~/.claude.json 备份校验失败，保留未完成副本：$partial" }
         }
         Write-JsonAtomic (Join-Path $partial 'manifest.json') ([ordered]@{
-            files = $sourceStats.Files
-            regularFileBytes = $sourceStats.Bytes
+            files = $sourceInventory.Files
+            regularFileBytes = $sourceInventory.Bytes
+            reparsePointCount = $sourceInventory.ReparsePoints.Count
+            reparsePoints = @($sourceInventory.ReparsePoints)
             claudeJsonCopied = $identityCopied
         })
         Move-Item -LiteralPath $partial -Destination $final
