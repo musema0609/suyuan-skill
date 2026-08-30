@@ -18,7 +18,7 @@ $script:AccountCacheKeys = @(
     'cachedChromeExtensionInstalled', 'cachedDynamicConfigs', 'cachedExperimentData', 'cachedExperimentFeatures',
     'cachedExtraUsageDisabledReason', 'cachedGrowthBookFeatures', 'cachedGrowthBookFeaturesAt', 'cachedStatsigGates',
     'clientDataCache', 'clientDataCacheSlots', 'feedbackSurveyState', 'groveConfigCache', 'metricsStatusCache',
-    'modelAccessCache', 'oauthAccount', 'orgModelDefaultCache', 'passesEligibilityCache', 's1mAccessCache'
+    'modelAccessCache', 'oauthAccount', 'orgModelDefaultCache', 'overageCreditGrantCache', 'passesEligibilityCache', 's1mAccessCache'
 )
 $script:ProtectedNames = @(
     '.credentials.json', 'CLAUDE.md', 'agents', 'backups', 'commands', 'debug', 'file-history', 'history.jsonl', 'hooks',
@@ -489,18 +489,52 @@ function Test-CredentialTarget([string]$UserHomePath) {
     return (Test-Path -LiteralPath $roots.Credentials -PathType Leaf) -or (Test-LegacyCredentialTarget $UserHomePath)
 }
 
-function Invoke-ClaudeAuthLogout([string]$UserHomePath) {
-    $actualHome = [Environment]::GetFolderPath('UserProfile')
-    if (-not (Get-FullPath $UserHomePath).Equals((Get-FullPath $actualHome), [StringComparison]::OrdinalIgnoreCase)) { return $false }
-    $command = Get-Command claude.exe,claude -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -eq $command) { return $false }
+function Resolve-ClaudeLogoutLauncher {
+    foreach ($name in @('claude.exe','claude.cmd','claude.bat','claude.ps1')) {
+        $command = Get-Command -Name $name -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -ne $command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+            return [string]$command.Source
+        }
+    }
+    return $null
+}
+
+function New-ClaudeLogoutStartInfo([string]$LauncherPath) {
+    if ([string]::IsNullOrWhiteSpace($LauncherPath)) { throw 'Claude 启动器路径为空' }
     $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = $command.Source
-    $psi.Arguments = '"auth" "logout"'
+    $extension = [IO.Path]::GetExtension($LauncherPath).ToLowerInvariant()
+    switch ($extension) {
+        '.exe' {
+            $psi.FileName = $LauncherPath
+            $psi.Arguments = '"auth" "logout"'
+        }
+        { $_ -in @('.cmd','.bat') } {
+            $commandInterpreter = if ([string]::IsNullOrWhiteSpace($env:ComSpec)) {
+                Join-Path $env:SystemRoot 'System32\cmd.exe'
+            } else { $env:ComSpec }
+            $psi.FileName = $commandInterpreter
+            $psi.Arguments = '/d /s /c ""' + $LauncherPath + '" auth logout"'
+        }
+        '.ps1' {
+            $engine = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            $psi.FileName = $engine
+            $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $LauncherPath + '" auth logout'
+        }
+        default { throw "不支持的 Claude Windows 启动器格式：$extension" }
+    }
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.CreateNoWindow = $true
+    return $psi
+}
+
+function Invoke-ClaudeAuthLogout([string]$UserHomePath) {
+    $actualHome = [Environment]::GetFolderPath('UserProfile')
+    if (-not (Get-FullPath $UserHomePath).Equals((Get-FullPath $actualHome), [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $launcher = Resolve-ClaudeLogoutLauncher
+    if ([string]::IsNullOrWhiteSpace($launcher)) { return $false }
+    $psi = New-ClaudeLogoutStartInfo $launcher
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $psi
     [void]$process.Start()
