@@ -82,6 +82,15 @@ Invoke-Test 'credential cleanup protects old backup copies and removes the activ
     } finally { Remove-Item -LiteralPath $testHomePath -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Invoke-Test 'Windows Claude launchers are wrapped by an executable host' {
+    $cmdInfo = New-ClaudeLogoutStartInfo 'C:\Program Files\Claude\claude.cmd'
+    Assert-True ($cmdInfo.FileName -match '(?i)cmd\.exe$') 'cmd launcher was not hosted by cmd.exe'
+    Assert-True ($cmdInfo.Arguments -match '(?i)auth logout') 'cmd launcher omitted logout arguments'
+    $psInfo = New-ClaudeLogoutStartInfo 'C:\Program Files\Claude\claude.ps1'
+    Assert-True ($psInfo.FileName -match '(?i)(powershell|pwsh)\.exe$') 'PowerShell launcher was not hosted by PowerShell'
+    Assert-True ($psInfo.Arguments -match '(?i)-File .*claude\.ps1.*auth logout') 'PowerShell launcher omitted logout arguments'
+}
+
 Invoke-Test 'backup records reparse points without following their targets' {
     $testHomePath = New-TestHome
     $externalPath = Join-Path ([IO.Path]::GetTempPath()) ('claude-cleanup-external-' + [guid]::NewGuid().ToString('N'))
@@ -135,7 +144,7 @@ Invoke-Test 'safe cache moves without touching project' {
 Invoke-Test 'identity rotation syncs internal backups' {
     $testHomePath = New-TestHome
     try {
-        Write-JsonAtomic (Join-Path $testHomePath '.claude.json') ([pscustomobject]@{ userID='old'; machineID='old'; oauthAccount=[pscustomobject]@{}; keep=1 })
+        Write-JsonAtomic (Join-Path $testHomePath '.claude.json') ([pscustomobject]@{ userID='old'; machineID='old'; oauthAccount=[pscustomobject]@{}; overageCreditGrantCache=[pscustomobject]@{}; keep=1 })
         $internal = Join-Path $testHomePath '.claude\backups\.claude.json.backup.1'
         Write-JsonAtomic $internal ([pscustomobject]@{ userID='old'; machineID='old'; oauthAccount=[pscustomobject]@{}; keepBackup=1 })
         Assert-Equal 1 (Rotate-ClaudeIdentity $testHomePath) 'backup count mismatch'
@@ -144,6 +153,7 @@ Invoke-Test 'identity rotation syncs internal backups' {
         Assert-Equal (Get-PropertyValue $main 'userID') (Get-PropertyValue $saved 'userID') 'userID not synchronized'
         Assert-Equal (Get-PropertyValue $main 'machineID') (Get-PropertyValue $saved 'machineID') 'machineID not synchronized'
         Assert-True (-not (Test-HasProperty $main 'oauthAccount')) 'oauthAccount remained in main identity'
+        Assert-True (-not (Test-HasProperty $main 'overageCreditGrantCache')) 'overageCreditGrantCache remained in main identity'
         Assert-True (-not (Test-HasProperty $saved 'oauthAccount')) 'oauthAccount remained in backup identity'
         Assert-True (([string](Get-PropertyValue $main 'userID')).Length -eq 64) 'rotated ID is not 64 hex characters'
     } finally { Remove-Item -LiteralPath $testHomePath -Recurse -Force -ErrorAction SilentlyContinue }
