@@ -565,7 +565,8 @@ function Invoke-ClaudeCleanup([switch]$AuditOnly, [string]$UserHomePath) {
         if ($setTimezone) {
             Write-Host '[系统步骤] Set-TimeZone 可能要求管理员 PowerShell；脚本不会读取或保存密码。'
         }
-        Write-Host (if ($rotate) { "[2/7] 身份轮换：同步 $(Rotate-ClaudeIdentity $UserHomePath) 份内部备份" } else { '[2/7] 身份保持不变' })
+        $identityProgress = if ($rotate) { "[2/7] 身份轮换：同步 $(Rotate-ClaudeIdentity $UserHomePath) 份内部备份" } else { '[2/7] 身份保持不变' }
+        Write-Host $identityProgress
         if ($credential) { Remove-CredentialTarget }
         Write-Host ("[3/7] Windows Credential Manager：{0}" -f $(if ($credential) {'已处理'} else {'保持不变'}))
         $batch = Join-Path $UserHomePath ('ClaudeCleanupTrash\claude-cleanup-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fffffff'))
