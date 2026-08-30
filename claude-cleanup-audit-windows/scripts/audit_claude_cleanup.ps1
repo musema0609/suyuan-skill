@@ -101,6 +101,7 @@ function Get-AuditRoots([string]$UserHomePath) {
         Home = $homeFull
         Claude = Join-Path $UserHomePath '.claude'
         Identity = Join-Path $UserHomePath '.claude.json'
+        Credentials = Join-Path $UserHomePath '.claude\.credentials.json'
         Settings = Join-Path $UserHomePath '.claude\settings.json'
         LocalAppData = [IO.Path]::GetFullPath($local)
         AppData = [IO.Path]::GetFullPath($roaming)
@@ -289,13 +290,22 @@ function Invoke-ClaudeCleanupAudit([string]$UserHomePath, [string]$ExpectedZone,
     $presentCaches = @(Get-ExistingPaths $cachePaths)
     $items.Add((New-StatusItem 'claude-cli-cache' 'Claude CLI caches/usage files' $(if (-not $presentCaches.Count) {'done'} else {'needs_agent_action'}) $(if (-not $presentCaches.Count) {'已验证'} else {'Agent 待处理'}) $(if (-not $presentCaches.Count) {'all target paths absent'} else {'still present: ' + ($presentCaches -join ', ')})))
 
+    $credentialFileFound = Test-Path -LiteralPath $roots.Credentials -PathType Leaf
+    $items.Add((New-StatusItem 'credential-file' 'Claude Code Windows OAuth credential file' $(if ($credentialFileFound) {'needs_agent_action'} else {'done'}) $(if ($credentialFileFound) {'Agent 待处理'} else {'已验证'}) $(if ($credentialFileFound) {'present; values not read'} else {'not found'})))
     if (Get-Command cmdkey.exe -ErrorAction SilentlyContinue) {
         $credentialOutput = (& cmdkey.exe /list 2>&1 | Out-String)
-        $credentialFound = $credentialOutput.IndexOf('Claude Code-credentials', [StringComparison]::OrdinalIgnoreCase) -ge 0
-        $items.Add((New-StatusItem 'credential-manager' 'Credential Manager Claude Code-credentials' $(if ($credentialFound) {'needs_agent_action'} else {'done'}) $(if ($credentialFound) {'Agent 待处理'} else {'已验证'}) $(if ($credentialFound) {'found'} else {'not found'})))
+        $legacyCredentialFound = $credentialOutput.IndexOf('Claude Code-credentials', [StringComparison]::OrdinalIgnoreCase) -ge 0
+        $items.Add((New-StatusItem 'credential-manager-legacy' 'Legacy Credential Manager Claude Code-credentials' $(if ($legacyCredentialFound) {'needs_agent_action'} else {'done'}) $(if ($legacyCredentialFound) {'Agent 待处理'} else {'已验证'}) $(if ($legacyCredentialFound) {'found'} else {'not found'})))
     } else {
-        $items.Add((New-StatusItem 'credential-manager' 'Credential Manager Claude Code-credentials' 'unknown' '系统/第三方限制' 'cmdkey.exe unavailable'))
+        $items.Add((New-StatusItem 'credential-manager-legacy' 'Legacy Credential Manager Claude Code-credentials' 'unknown' '系统/第三方限制' 'cmdkey.exe unavailable'))
     }
+    $plainBackupCredentials = @()
+    $protectedBackupCredentials = @()
+    if (Test-Path -LiteralPath $backupRoot -PathType Container) {
+        $plainBackupCredentials = @(Get-ChildItem -LiteralPath $backupRoot -Directory -Filter 'claude-cleanup-*' -Force -ErrorAction SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'dot-claude\.credentials.json') -PathType Leaf })
+        $protectedBackupCredentials = @(Get-ChildItem -LiteralPath $backupRoot -Directory -Filter 'claude-cleanup-*' -Force -ErrorAction SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'credentials.json.dpapi') -PathType Leaf })
+    }
+    $items.Add((New-StatusItem 'credential-backups' 'Claude backup credential copies' $(if ($plainBackupCredentials.Count) {'needs_agent_action'} else {'done'}) $(if ($plainBackupCredentials.Count) {'Agent 待处理'} else {'已验证'}) "readable=$($plainBackupCredentials.Count); dpapiProtected=$($protectedBackupCredentials.Count)"))
 
     $desktopInstall = @(Get-DesktopInstallEvidence $UserHomePath)
     $desktopPresent = $desktopInstall.Count -gt 0
