@@ -21,7 +21,7 @@ $script:AccountCacheKeys = @(
     'modelAccessCache', 'oauthAccount', 'orgModelDefaultCache', 'passesEligibilityCache', 's1mAccessCache'
 )
 $script:ProtectedNames = @(
-    'CLAUDE.md', 'agents', 'backups', 'commands', 'debug', 'file-history', 'history.jsonl', 'hooks',
+    '.credentials.json', 'CLAUDE.md', 'agents', 'backups', 'commands', 'debug', 'file-history', 'history.jsonl', 'hooks',
     'mcp-servers', 'plans', 'plugins', 'projects', 'scripts', 'session-env', 'sessions', 'settings.json',
     'settings.local.json', 'skills', 'tasks', 'todos'
 )
@@ -134,6 +134,7 @@ function Get-CleanupRoots([string]$UserHomePath) {
         Home = Get-FullPath $UserHomePath
         Claude = Join-Path $UserHomePath '.claude'
         Identity = Join-Path $UserHomePath '.claude.json'
+        Credentials = Join-Path $UserHomePath '.claude\.credentials.json'
         Settings = Join-Path $UserHomePath '.claude\settings.json'
         LocalAppData = Get-FullPath $local
         AppData = Get-FullPath $roaming
@@ -281,6 +282,42 @@ function Copy-TreeWithoutReparse([string]$Source, [string]$Destination) {
     }
 }
 
+function Test-ByteArrayEqual([byte[]]$Left, [byte[]]$Right) {
+    if ($null -eq $Left -or $null -eq $Right -or $Left.Length -ne $Right.Length) { return $false }
+    for ($i = 0; $i -lt $Left.Length; $i++) {
+        if ($Left[$i] -ne $Right[$i]) { return $false }
+    }
+    return $true
+}
+
+function Protect-CredentialFile([string]$SourcePath, [string]$DestinationPath) {
+    if (-not (Test-Path -LiteralPath $SourcePath -PathType Leaf)) { return $false }
+    if (-not ('System.Security.Cryptography.ProtectedData' -as [type])) {
+        Add-Type -AssemblyName System.Security -ErrorAction Stop
+    }
+    $plain = [IO.File]::ReadAllBytes($SourcePath)
+    try {
+        $protected = [Security.Cryptography.ProtectedData]::Protect(
+            $plain,
+            $null,
+            [Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        $parent = Split-Path -Parent $DestinationPath
+        if (-not (Test-Path -LiteralPath $parent -PathType Container)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+        [IO.File]::WriteAllBytes($DestinationPath, $protected)
+        $roundTrip = [Security.Cryptography.ProtectedData]::Unprotect(
+            [IO.File]::ReadAllBytes($DestinationPath),
+            $null,
+            [Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        if (-not (Test-ByteArrayEqual $plain $roundTrip)) { throw 'DPAPI round-trip verification failed' }
+    } catch {
+        if (Test-Path -LiteralPath $DestinationPath) { Remove-Item -LiteralPath $DestinationPath -Force -ErrorAction SilentlyContinue }
+        throw "凭据 DPAPI 保护失败：$($_.Exception.Message)"
+    }
+    return $true
+}
+
 function New-ClaudeBackup([string]$UserHomePath) {
     $roots = Get-CleanupRoots $UserHomePath
     if (-not (Test-Path -LiteralPath $roots.Claude -PathType Container)) {
@@ -294,8 +331,20 @@ function New-ClaudeBackup([string]$UserHomePath) {
     New-Item -ItemType Directory -Path $partial -Force | Out-Null
     try {
         Copy-TreeWithoutReparse $roots.Claude (Join-Path $partial 'dot-claude')
+        $credentialProtected = $false
+        $credentialCopy = Join-Path $partial 'dot-claude\.credentials.json'
+        if (Test-Path -LiteralPath $credentialCopy -PathType Leaf) {
+            $credentialProtected = Protect-CredentialFile $credentialCopy (Join-Path $partial 'credentials.json.dpapi')
+            Remove-Item -LiteralPath $credentialCopy -Force
+        }
         $backupInventory = Get-TreeInventory (Join-Path $partial 'dot-claude')
-        if ($sourceInventory.Files -ne $backupInventory.Files -or $sourceInventory.Bytes -ne $backupInventory.Bytes -or $backupInventory.ReparsePoints.Count -ne 0) {
+        $expectedFiles = $sourceInventory.Files
+        $expectedBytes = $sourceInventory.Bytes
+        if ($credentialProtected) {
+            $expectedFiles--
+            $expectedBytes -= [long](Get-Item -LiteralPath $roots.Credentials).Length
+        }
+        if ($expectedFiles -ne $backupInventory.Files -or $expectedBytes -ne $backupInventory.Bytes -or $backupInventory.ReparsePoints.Count -ne 0) {
             throw "~/.claude 备份校验失败，保留未完成副本：$partial"
         }
         $identityCopied = $false
@@ -306,17 +355,46 @@ function New-ClaudeBackup([string]$UserHomePath) {
             if (-not $identityCopied) { throw "~/.claude.json 备份校验失败，保留未完成副本：$partial" }
         }
         Write-JsonAtomic (Join-Path $partial 'manifest.json') ([ordered]@{
-            files = $sourceInventory.Files
-            regularFileBytes = $sourceInventory.Bytes
+            files = $backupInventory.Files
+            regularFileBytes = $backupInventory.Bytes
+            sourceFiles = $sourceInventory.Files
+            sourceRegularFileBytes = $sourceInventory.Bytes
             reparsePointCount = $sourceInventory.ReparsePoints.Count
             reparsePoints = @($sourceInventory.ReparsePoints)
             claudeJsonCopied = $identityCopied
+            credentialProtected = $credentialProtected
+            credentialProtection = $(if ($credentialProtected) {'Windows DPAPI CurrentUser'} else {'not present'})
         })
         Move-Item -LiteralPath $partial -Destination $final
         return $final
     } catch {
         throw
     }
+}
+
+function Protect-ExistingBackupCredentials([string]$UserHomePath) {
+    $backupRoot = Join-Path $UserHomePath 'ClaudeBackups'
+    if (-not (Test-Path -LiteralPath $backupRoot -PathType Container)) { return 0 }
+    $protectedCount = 0
+    foreach ($backup in @(Get-ChildItem -LiteralPath $backupRoot -Directory -Filter 'claude-cleanup-*' -Force -ErrorAction Stop)) {
+        if ($backup.Name.EndsWith('.partial', [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $plain = Join-Path $backup.FullName 'dot-claude\.credentials.json'
+        if (-not (Test-Path -LiteralPath $plain -PathType Leaf)) { continue }
+        $protectedPath = Join-Path $backup.FullName 'credentials.json.dpapi'
+        [void](Protect-CredentialFile $plain $protectedPath)
+        Remove-Item -LiteralPath $plain -Force
+        $inventory = Get-TreeInventory (Join-Path $backup.FullName 'dot-claude')
+        $manifestPath = Join-Path $backup.FullName 'manifest.json'
+        $manifest = Read-JsonFile $manifestPath -AllowMissing
+        Set-PropertyValue $manifest 'files' $inventory.Files
+        Set-PropertyValue $manifest 'regularFileBytes' $inventory.Bytes
+        Set-PropertyValue $manifest 'credentialProtected' $true
+        Set-PropertyValue $manifest 'credentialProtection' 'Windows DPAPI CurrentUser'
+        Set-PropertyValue $manifest 'credentialSanitizedAt' ([DateTime]::UtcNow.ToString('o'))
+        Write-JsonAtomic $manifestPath $manifest
+        $protectedCount++
+    }
+    return $protectedCount
 }
 
 function Move-ToQuarantine(
@@ -398,16 +476,47 @@ function Update-SimpleMode([string]$UserHomePath, [int]$Mode) {
     Write-JsonAtomic $roots.Settings $data
 }
 
-function Test-CredentialTarget {
+function Test-LegacyCredentialTarget([string]$UserHomePath) {
+    $actualHome = [Environment]::GetFolderPath('UserProfile')
+    if (-not (Get-FullPath $UserHomePath).Equals((Get-FullPath $actualHome), [StringComparison]::OrdinalIgnoreCase)) { return $false }
     if (-not (Get-Command cmdkey.exe -ErrorAction SilentlyContinue)) { return $false }
     $output = (& cmdkey.exe /list 2>&1 | Out-String)
     return $output.IndexOf($script:CredentialTarget, [StringComparison]::OrdinalIgnoreCase) -ge 0
 }
 
-function Remove-CredentialTarget {
-    if (-not (Get-Command cmdkey.exe -ErrorAction SilentlyContinue)) { throw 'cmdkey.exe 不可用，无法处理 Windows Credential Manager' }
-    & cmdkey.exe ("/delete:$($script:CredentialTarget)") | Out-Null
-    if ($LASTEXITCODE -ne 0 -and (Test-CredentialTarget)) { throw 'Windows Credential Manager 凭据删除失败' }
+function Test-CredentialTarget([string]$UserHomePath) {
+    $roots = Get-CleanupRoots $UserHomePath
+    return (Test-Path -LiteralPath $roots.Credentials -PathType Leaf) -or (Test-LegacyCredentialTarget $UserHomePath)
+}
+
+function Invoke-ClaudeAuthLogout([string]$UserHomePath) {
+    $actualHome = [Environment]::GetFolderPath('UserProfile')
+    if (-not (Get-FullPath $UserHomePath).Equals((Get-FullPath $actualHome), [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    $command = Get-Command claude.exe,claude -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $command) { return $false }
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $command.Source
+    $psi.Arguments = '"auth" "logout"'
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $psi
+    [void]$process.Start()
+    if (-not $process.WaitForExit(20000)) { throw 'claude auth logout 超时；脚本不会自动结束该进程' }
+    return $process.ExitCode -eq 0
+}
+
+function Remove-CredentialTarget([string]$UserHomePath) {
+    $roots = Get-CleanupRoots $UserHomePath
+    [void](Invoke-ClaudeAuthLogout $UserHomePath)
+    if (Test-Path -LiteralPath $roots.Credentials -PathType Leaf) { Remove-Item -LiteralPath $roots.Credentials -Force }
+    if (Test-LegacyCredentialTarget $UserHomePath) {
+        & cmdkey.exe ("/delete:$($script:CredentialTarget)") | Out-Null
+        if ($LASTEXITCODE -ne 0 -and (Test-LegacyCredentialTarget $UserHomePath)) { throw '旧版 Windows Credential Manager 凭据删除失败' }
+    }
+    if ((Test-Path -LiteralPath $roots.Credentials -PathType Leaf) -or (Test-LegacyCredentialTarget $UserHomePath)) { throw 'Claude Code 凭据删除后验证失败' }
 }
 
 function Get-DesktopInstallState([string]$UserHomePath) {
@@ -517,7 +626,7 @@ function Invoke-ClaudeCleanup([switch]$AuditOnly, [string]$UserHomePath) {
     Write-Host ("- %USERPROFILE%\.claude：{0}；%USERPROFILE%\.claude.json：{1}" -f $(if (Test-Path $roots.Claude -PathType Container) {'存在'} else {'不存在'}), $(if (Test-Path $roots.Identity -PathType Leaf) {'存在'} else {'不存在'}))
     Write-Host "- 可自动清理缓存/日志：$($safe.Count) 项；Claude Desktop 持久数据：$($desktop.Count) 项"
     Write-Host ("- Claude Desktop 应用：{0}；相关进程：{1} 个" -f $(if ($installState.Present) {'存在'} else {'未检测到'}), $processes.Count)
-    Write-Host ("- Windows Credential Manager：{0}" -f $(if (Test-CredentialTarget) {'检测到 Claude Code-credentials'} else {'未检测到'}))
+    Write-Host ("- Claude Code 凭据：{0}" -f $(if (Test-CredentialTarget $UserHomePath) {'检测到 .credentials.json 或旧版 Credential Manager 项'} else {'未检测到'}))
     Write-Host ("- 遥测关闭键：{0}（脚本不会改变）" -f $(if ($disabled.Count) {$disabled -join ', '} else {'未检测到'}))
     Write-Host ("- 精简模式：{0}；时区：{1}" -f $(if ($simpleValue.ToLowerInvariant() -in @('1','true')) {'已启用'} else {'未启用'}), (Get-CurrentTimeZoneId))
     if ($AuditOnly) { return 0 }
@@ -525,7 +634,7 @@ function Invoke-ClaudeCleanup([switch]$AuditOnly, [string]$UserHomePath) {
         if ([Console]::IsInputRedirected) { throw '拒绝执行：需要真实交互式终端完成知情确认' }
         Write-Host "`n只询问有风险的操作；可再生缓存和日志不逐项询问。"
         $rotate = Read-Yes '轮换本地 userID/machineID，并清除已知账号缓存字段？'
-        $credential = Read-Yes '删除 Windows Credential Manager 的 Claude Code-credentials（会退出 CLI 登录）？'
+        $credential = Read-Yes '删除 .claude\.credentials.json 和旧版 Credential Manager 项（会退出 CLI 登录）？'
         $desktopMode = Read-Choice 'Claude Desktop：0 保留；1 清登录态/持久数据；2 再卸载应用。选择 [0]' @(0,1,2)
         $simpleMode = Read-Choice '精简模式：0 保持；1 启用 CLAUDE_CODE_SIMPLE；2 移除该设置。选择 [0]' @(0,1,2)
         $setTimezone = (Get-CurrentTimeZoneId) -ne $script:TaipeiTimeZone -and (Read-Yes '把 Windows 时区改为 Taipei Standard Time？')
@@ -552,7 +661,7 @@ function Invoke-ClaudeCleanup([switch]$AuditOnly, [string]$UserHomePath) {
         foreach ($target in $targetList) { Write-Host "   - $target" }
         Write-Host ("3. 身份轮换：{0}；删除凭据：{1}；桌面应用模式：{2}；精简模式：{3}；修改时区：{4}" -f $rotate, $credential, $desktopMode, $simpleMode, $setTimezone)
         Write-Host '绝不清理 sessions、projects、history、skills、plugins、hooks、commands、agents、MCP、设置文件或任何项目/Git/Codex 数据。'
-        Write-Host '文件只进隔离目录；包管理器卸载恢复需重新安装；遥测键逐值保持不变。'
+        Write-Host '普通文件只进隔离目录；凭据在 DPAPI 加密备份验证后永久移除；包管理器卸载恢复需重新安装；遥测键逐值保持不变。'
         if ((Read-Host '完全理解后输入 CONFIRM 开始；其他输入取消').Trim() -cne 'CONFIRM') {
             Write-Host '已取消，没有修改任何内容。'
             return 1
@@ -560,6 +669,7 @@ function Invoke-ClaudeCleanup([switch]$AuditOnly, [string]$UserHomePath) {
 
         $beforeTelemetry = Get-TelemetrySnapshot (Read-JsonFile $roots.Settings -AllowMissing)
         $protectedBefore = @($script:ProtectedNames | ForEach-Object { Join-Path $roots.Claude $_ } | Where-Object { Test-Path -LiteralPath $_ })
+        if ($credential) { $protectedBefore = @($protectedBefore | Where-Object { -not $_.Equals($roots.Credentials, [StringComparison]::OrdinalIgnoreCase) }) }
         $backup = New-ClaudeBackup $UserHomePath
         Write-Host "`n[1/7] 全量备份已校验：$backup"
         if ($setTimezone) {
@@ -567,8 +677,12 @@ function Invoke-ClaudeCleanup([switch]$AuditOnly, [string]$UserHomePath) {
         }
         $identityProgress = if ($rotate) { "[2/7] 身份轮换：同步 $(Rotate-ClaudeIdentity $UserHomePath) 份内部备份" } else { '[2/7] 身份保持不变' }
         Write-Host $identityProgress
-        if ($credential) { Remove-CredentialTarget }
-        Write-Host ("[3/7] Windows Credential Manager：{0}" -f $(if ($credential) {'已处理'} else {'保持不变'}))
+        $credentialBackupsProtected = 0
+        if ($credential) {
+            $credentialBackupsProtected = Protect-ExistingBackupCredentials $UserHomePath
+            Remove-CredentialTarget $UserHomePath
+        }
+        Write-Host ("[3/7] Claude Code 凭据：{0}" -f $(if ($credential) {"已移除；DPAPI 保护 $credentialBackupsProtected 份旧备份"} else {'保持不变'}))
         $batch = Join-Path $UserHomePath ('ClaudeCleanupTrash\claude-cleanup-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fffffff'))
         $moved = [Collections.Generic.List[string]]::new()
         foreach ($target in $targetList) {
