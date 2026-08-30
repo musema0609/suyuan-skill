@@ -154,5 +154,10 @@ Invoke-Test 'safe target discovery stays on the narrow allowlist' {
     } finally { Remove-Item -LiteralPath $testHomePath -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+Invoke-Test 'progress branches are evaluated before Write-Host' {
+    $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
+    Assert-True ($source -notmatch 'Write-Host\s+\(if\s*\(') 'an if statement is still being invoked as a Write-Host argument'
+}
+
 Write-Host "`n$($script:Passed) passed, $($script:Failed) failed"
 if ($script:Failed -gt 0) { exit 1 }
