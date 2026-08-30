@@ -59,15 +59,17 @@ Invoke-Test 'audit reports core items and never prints token values' {
 }
 '@
         Set-Content -LiteralPath (Join-Path $testHomePath '.claude\settings.json') -Value $settings -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $testHomePath '.claude\.credentials.json') -Value '{"claudeAiOauth":{"accessToken":"audit-oauth-secret"}}' -Encoding UTF8
         Set-Content -LiteralPath (Join-Path $testHomePath '.claude.json') -Value '{"userID":"12345678901234567890","oauthAccount":{"x":1}}' -Encoding UTF8
         New-Item -ItemType Directory -Path (Join-Path $testHomePath '.claude\projects'),(Join-Path $testHomePath '.claude\cache') -Force | Out-Null
         $items = @(Invoke-ClaudeCleanupAudit -UserHomePath $testHomePath -ExpectedZone '' -DesktopExpectation 'removed' -SlimmingExpected:$false)
         $ids = @($items.id)
-        foreach ($id in @('settings-json','auth-token','claude-json-userid','claude-cli-cache','credential-manager','desktop-app','active-processes','browser-profiles','external-identity')) {
+        foreach ($id in @('settings-json','auth-token','claude-json-userid','claude-cli-cache','credential-file','credential-manager-legacy','credential-backups','desktop-app','active-processes','browser-profiles','external-identity')) {
             Assert-True ($ids -contains $id) "missing audit item: $id"
         }
         $serialized = $items | ConvertTo-Json -Depth 8
         Assert-True ($serialized -notmatch 'audit-secret-token-value') 'token value leaked in audit output'
+        Assert-True ($serialized -notmatch 'audit-oauth-secret') 'OAuth credential value leaked in audit output'
         $tokenItem = $items | Where-Object id -eq 'auth-token'
         Assert-True ($tokenItem.evidence -eq 'present, value redacted') 'token presence was not reported safely'
     } finally { Remove-Item -LiteralPath $testHomePath -Recurse -Force -ErrorAction SilentlyContinue }
