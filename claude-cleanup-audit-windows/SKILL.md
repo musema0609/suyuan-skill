@@ -1,6 +1,6 @@
 ---
 name: claude-cleanup-audit-windows
-description: Audit and safely modify local Claude Code and Claude Desktop cleanup/privacy settings on Windows. Use when the user asks to review, clean, disable, preserve, or verify Claude local data, telemetry-related settings, login/browser-opening behavior, timezone, device name, Windows username, Credential Manager entries, desktop app data, browser profiles, or local Claude cleanup checklists.
+description: Audit and safely modify local Claude Code and Claude Desktop cleanup/privacy settings on Windows. Use when the user asks to review, clean, disable, preserve, or verify Claude local data, telemetry-related settings, OAuth credential files, login/browser-opening behavior, timezone, device name, Windows username, legacy Credential Manager entries, desktop app data, browser profiles, or local Claude cleanup checklists.
 ---
 
 # Claude Cleanup Audit（Windows）
@@ -34,7 +34,7 @@ Ask about:
 - Preserve `ANTHROPIC_AUTH_TOKEN` or remove it.
 - Preserve `%USERPROFILE%\.claude\projects`, `history.jsonl`, `file-history`, and `debug`.
 - Remove Claude Desktop data only, or also uninstall the Windows app.
-- Delete Windows Credential Manager target `Claude Code-credentials`.
+- Delete `%USERPROFILE%\.claude\.credentials.json` after a verified DPAPI-protected backup, and remove any legacy Windows Credential Manager target `Claude Code-credentials`.
 - Scrub `%USERPROFILE%\.claude.json` or delete it entirely.
 - Clear Claude CLI caches and usage files.
 - Stop active Claude Code/Claude Desktop processes or leave them running.
@@ -108,7 +108,7 @@ The recurring checklist should include:
 - `ANTHROPIC_AUTH_TOKEN` preservation/removal.
 - `%USERPROFILE%\.claude\settings.json` browser behavior and privacy-related keys.
 - Claude CLI caches and usage files.
-- Windows Credential Manager `Claude Code-credentials`.
+- `%USERPROFILE%\.claude\.credentials.json`, DPAPI-protected cleanup-backup copies, and any legacy Windows Credential Manager `Claude Code-credentials`.
 - Claude Desktop application registration and data directories.
 - Active Claude processes.
 - Windows timezone, locale, language, device name, account full name, username, and profile path.
