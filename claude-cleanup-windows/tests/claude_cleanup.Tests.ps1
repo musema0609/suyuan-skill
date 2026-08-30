@@ -40,7 +40,7 @@ function Invoke-Test([string]$Name, [scriptblock]$Body) {
     }
 }
 
-Invoke-Test 'backup contains all Claude data and identity' {
+Invoke-Test 'backup contains Claude data and identity while DPAPI-protecting credentials' {
     $testHomePath = New-TestHome
     try {
         $project = Join-Path $testHomePath '.claude\projects\session.jsonl'
@@ -48,13 +48,37 @@ Invoke-Test 'backup contains all Claude data and identity' {
         New-Item -ItemType Directory -Path (Split-Path $project -Parent),(Split-Path $skill -Parent) -Force | Out-Null
         Set-Content -LiteralPath $project -Value 'session' -Encoding UTF8
         Set-Content -LiteralPath $skill -Value 'skill' -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $testHomePath '.claude\.credentials.json') -Value '{"claudeAiOauth":{"accessToken":"synthetic-access","refreshToken":"synthetic-refresh"}}' -Encoding UTF8
         Set-Content -LiteralPath (Join-Path $testHomePath '.claude.json') -Value '{"userID":"old"}' -Encoding UTF8
         $backup = New-ClaudeBackup $testHomePath
         Assert-True (Test-Path -LiteralPath (Join-Path $backup 'dot-claude\projects\session.jsonl')) 'project missing from backup'
         Assert-True (Test-Path -LiteralPath (Join-Path $backup 'dot-claude\skills\demo\SKILL.md')) 'skill missing from backup'
         Assert-True (Test-Path -LiteralPath (Join-Path $backup 'claude.json')) 'identity missing from backup'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $backup 'dot-claude\.credentials.json'))) 'readable credential remained in dot-claude backup'
+        $protectedCredential = Join-Path $backup 'credentials.json.dpapi'
+        Assert-True (Test-Path -LiteralPath $protectedCredential) 'DPAPI credential backup missing'
+        $decrypted = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($protectedCredential),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)
+        Assert-True (([Text.Encoding]::UTF8.GetString($decrypted)) -match 'synthetic-access') 'DPAPI credential round-trip failed'
         $manifest = Read-JsonFile (Join-Path $backup 'manifest.json')
         Assert-True ([bool](Get-PropertyValue $manifest 'claudeJsonCopied')) 'manifest did not verify identity'
+        Assert-True ([bool](Get-PropertyValue $manifest 'credentialProtected')) 'manifest did not record DPAPI credential protection'
+    } finally { Remove-Item -LiteralPath $testHomePath -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Invoke-Test 'credential cleanup protects old backup copies and removes the active file' {
+    $testHomePath = New-TestHome
+    try {
+        $active = Join-Path $testHomePath '.claude\.credentials.json'
+        Set-Content -LiteralPath $active -Value '{"claudeAiOauth":{"accessToken":"active-token"}}' -Encoding UTF8
+        $oldBackup = Join-Path $testHomePath 'ClaudeBackups\claude-cleanup-old'
+        New-Item -ItemType Directory -Path (Join-Path $oldBackup 'dot-claude') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $oldBackup 'dot-claude\.credentials.json') -Value '{"claudeAiOauth":{"accessToken":"backup-token"}}' -Encoding UTF8
+        Write-JsonAtomic (Join-Path $oldBackup 'manifest.json') ([ordered]@{})
+        Assert-Equal 1 (Protect-ExistingBackupCredentials $testHomePath) 'old backup credential count mismatch'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $oldBackup 'dot-claude\.credentials.json'))) 'readable old backup credential remained'
+        Assert-True (Test-Path -LiteralPath (Join-Path $oldBackup 'credentials.json.dpapi')) 'old backup DPAPI credential missing'
+        Remove-CredentialTarget $testHomePath
+        Assert-True (-not (Test-Path -LiteralPath $active)) 'active credential file remained'
     } finally { Remove-Item -LiteralPath $testHomePath -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
