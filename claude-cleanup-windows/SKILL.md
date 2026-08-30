@@ -19,7 +19,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\claude_cleanup.p
 
 - 第一个写操作是完整复制并校验 `%USERPROFILE%\.claude`，同时备份 `%USERPROFILE%\.claude.json`；
 - 可再生缓存和日志会自动纳入最终清单，不逐项询问；
-- 身份、Windows Credential Manager、桌面端登录态、应用、精简模式和时区属于风险操作，仍由用户选择；
+- 身份、`%USERPROFILE%\.claude\.credentials.json`（以及旧版 Windows Credential Manager）、桌面端登录态、应用、精简模式和时区属于风险操作，仍由用户选择；
 - 文件移除只进入带时间戳的隔离目录，不会永久删除；Windows 包管理器卸载应用属于例外，恢复需要重新安装；
 - 保护路径和遥测设置保持不变。
 
@@ -73,7 +73,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\claude_cleanup.p
 ## 风险操作
 
 - **本地身份轮换**：轮换 `%USERPROFILE%\.claude.json` 的 `userID`、`machineID`，清除已知账号缓存字段，并把同一组新值同步到 `%USERPROFILE%\.claude\backups\.claude.json.backup.*`。仅用于隐私和排障，不宣称能改变平台关联判断。
-- **Windows Credential Manager**：删除 `Claude Code-credentials` 会退出 CLI 登录，单独选择。
+- **Claude Code 登录凭据**：Windows 官方位置是 `%USERPROFILE%\.claude\.credentials.json`；旧版本还可能存在 Credential Manager 的 `Claude Code-credentials`。选择删除会先调用官方 `claude auth logout`，再验证并移除残留本机凭据。完整备份中的凭据必须先用当前 Windows 用户的 DPAPI 加密并验证，不得留下可读 JSON；现有清理备份里的可读凭据副本也要转为 DPAPI 后再删除。
 - **Claude Desktop**：可选择仅清持久数据与登录态，或再卸载 Windows 应用。MSIX/Appx 或 WinGet 卸载由系统包管理器执行；脚本不运行未知注册表中的卸载命令。
 - **最小提示词模式**：在 `settings.json` 的 `env` 中设置或移除 `CLAUDE_CODE_SIMPLE=1`。启用后使用最小系统提示词和有限工具，并跳过 hooks、skills、plugins、MCP、自动记忆及 `CLAUDE.md` 自动发现；这些资产不会被删除。一次性脚本调用优先考虑 `claude --bare`。
 - **台北时区**：仅在 Windows 当前不是 `Taipei Standard Time` 时询问。使用 `Set-TimeZone` 修改并验证；没有管理员权限时停止并让用户在管理员 PowerShell 中重跑。
