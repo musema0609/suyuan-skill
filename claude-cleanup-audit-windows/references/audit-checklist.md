@@ -38,9 +38,11 @@ Use this reference when a user asks for a complete Claude Code or Claude Desktop
   - `%LOCALAPPDATA%\Claude\Code Cache`
   - `%LOCALAPPDATA%\Claude\GPUCache`
 
-## Windows Credential Manager And Processes
+## Windows Credentials And Processes
 
-- Check Windows Credential Manager target `Claude Code-credentials` without displaying secret material.
+- Check `%USERPROFILE%\.claude\.credentials.json` without displaying secret material. On current Windows Claude Code this is the primary OAuth credential store.
+- Check cleanup backups for readable `dot-claude\.credentials.json` copies and distinguish them from DPAPI-protected `credentials.json.dpapi` files.
+- Check the legacy Windows Credential Manager target `Claude Code-credentials` without displaying secret material.
 - Ask before deleting it.
 - List active Claude Code or Claude Desktop processes using process name and executable command line.
 - Ask before stopping processes because running sessions may lose state.
